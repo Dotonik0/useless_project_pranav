@@ -463,8 +463,6 @@ export const BatMap: React.FC<BatMapProps> = ({
       }, 12000);
 
       mapRef.current = map;
-      // TEMP-DEBUG: expose for headless repro (reverted after fix)
-      (window as unknown as { __batMap: MapLibreMap }).__batMap = map;
 
       // Layout often still settles (fonts, flex, boot overlay) right after
       // init — nudge the canvas so it never stays at 0x0 / blank.

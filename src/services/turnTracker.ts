@@ -143,6 +143,14 @@ export class TurnTracker {
     };
   }
 
+  /** Manually skip to the next step (SKIP STEP override). */
+  public advance(): void {
+    if (this.activeIndex < this.steps.length - 1) {
+      this.steps[this.activeIndex].completed = true;
+      this.activeIndex++;
+    }
+  }
+
   public reset(): void {
     this.activeIndex = 0;
     this.steps.forEach((s) => {

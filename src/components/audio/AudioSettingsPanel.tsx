@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Volume2, Upload, Play, CheckCircle, AlertCircle } from 'lucide-react';
-import { audioManager, type AudioMode } from '../../services/audioManager';
+import { audioManager } from '../../services/audioManager';
+import type { VoiceMode as AudioMode } from '../../services/settingsManager';
 import { saveCustomAudio, getAllCustomAudioKeys, type CustomSoundKey } from '../../services/audioDb';
 
 const CUSTOM_AUDIO_SLOTS: Array<{ key: CustomSoundKey; label: string; samplePhrase: string }> = [

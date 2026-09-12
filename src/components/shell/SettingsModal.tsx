@@ -3,7 +3,6 @@ import {
   X,
   Sliders,
   RefreshCw,
-  Eye,
   Volume2,
   Navigation,
   Sparkles,

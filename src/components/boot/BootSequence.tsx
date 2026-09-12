@@ -1,231 +1,322 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Shield, ChevronRight, Terminal } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Shield, Radio, Terminal, ChevronRight, Cpu, Activity, Lock } from 'lucide-react';
+import { sfx, unlockAudio } from '../../services/soundEffects';
 
 interface BootSequenceProps {
   onComplete: () => void;
 }
 
-interface BootLine {
-  text: string;
-  type?: 'header' | 'metric' | 'status' | 'ready';
-  delay: number;
-}
-
-const BOOT_LINES: BootLine[] = [
-  { text: 'BATCOMPUTER INITIALIZATION // PROTOCOL 773-ALPHA', type: 'header', delay: 200 },
-  { text: 'SYSTEM CORE ................. ONLINE', type: 'metric', delay: 250 },
-  { text: 'GEOSPATIAL DATABASE .......... ONLINE', type: 'metric', delay: 220 },
-  { text: 'MAP INTERFACE ................ ONLINE', type: 'metric', delay: 240 },
-  { text: 'NAVIGATION SYSTEM ............ ONLINE', type: 'metric', delay: 230 },
-  { text: 'POSITIONING SYSTEM ........... ONLINE', type: 'metric', delay: 260 },
-  { text: 'AUDIO SYSTEM ................. ONLINE', type: 'metric', delay: 210 },
-  { text: 'ROUTE ANALYSIS ............... ONLINE', type: 'metric', delay: 250 },
-  { text: 'SYSTEM STATUS: NOMINAL', type: 'status', delay: 350 },
-  { text: 'NAVIGATION SYSTEM READY', type: 'ready', delay: 400 },
-];
-
 export const BootSequence: React.FC<BootSequenceProps> = ({ onComplete }) => {
-  const [displayedLines, setDisplayedLines] = useState<number>(0);
-  const [progress, setProgress] = useState<number>(0);
-  const [isReady, setIsReady] = useState<boolean>(false);
-  const [isFadingOut, setIsFadingOut] = useState<boolean>(false);
+  const [opening, setOpening] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [canProceed, setCanProceed] = useState(false);
+  const [progress, setProgress] = useState(0);
 
-  const handleFinish = useCallback(() => {
-    localStorage.setItem('batmap_boot_completed', 'true');
-    setIsFadingOut(true);
-    setTimeout(() => {
-      onComplete();
-    }, 450);
-  }, [onComplete]);
-
-  // Handle ESC key to skip
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        handleFinish();
-      }
-      if (e.key === 'Enter' && isReady) {
-        handleFinish();
+    // Warm the AudioContext on first interaction (browsers block audio before it)
+    const unlock = () => unlockAudio();
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+
+    const bootLogs = [
+      "INITIALIZING BATCOMPUTER CORE v9.0.4...",
+      "CONNECTING TO WAYNE-NET SATELLITE MATRIX...",
+      "TACTICAL RADAR ENCRYPTED PROTOCOL ACTIVATED.",
+      "GEOSPATIAL VECTOR MATRIX ONLINE (100 KM RADIUS LOCK).",
+      "TACTICAL ROUTING ENGINE ARMED & READY."
+    ];
+
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    bootLogs.forEach((log, index) => {
+      timers.push(
+        setTimeout(() => {
+          setLogs((prev) => [...prev, log]);
+          sfx.playBootStep(index, bootLogs.length);
+          if (index === bootLogs.length - 1) {
+            setCanProceed(true);
+            // Online chime lands just after the final log line
+            setTimeout(() => sfx.playSystemOnline(), 250);
+          }
+        }, index * 600)
+      );
+    });
+    return () => {
+      timers.forEach(clearTimeout);
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  // Techy gate-breach progress ticker
+  useEffect(() => {
+    if (!opening) return;
+    setProgress(0);
+    const start = performance.now();
+    const duration = 1150;
+    let raf: number;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      // ease-out for techy feel
+      setProgress(Math.round((1 - Math.pow(1 - t, 3)) * 100));
+      if (t < 1) {
+        raf = requestAnimationFrame(tick);
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleFinish, isReady]);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [opening]);
 
-  // Terminal line-by-line progression
-  useEffect(() => {
-    if (displayedLines < BOOT_LINES.length) {
-      const line = BOOT_LINES[displayedLines];
-      const timer = setTimeout(() => {
-        setDisplayedLines((prev) => prev + 1);
-        const nextProgress = Math.round(((displayedLines + 1) / BOOT_LINES.length) * 100);
-        setProgress(nextProgress);
-      }, line.delay);
-      return () => clearTimeout(timer);
-    } else {
-      const readyTimer = setTimeout(() => {
-        setIsReady(true);
-      }, 300);
-      return () => clearTimeout(readyTimer);
-    }
-  }, [displayedLines]);
+  const handleInitiate = () => {
+    if (opening) return;
+    setOpening(true);
+    sfx.playLockSound();
+    // staggered beeps for gate release feel
+    setTimeout(() => sfx.playBeep(440, 'sawtooth', 0.08), 150);
+    setTimeout(() => sfx.playBeep(880, 'sawtooth', 0.08), 350);
+    setTimeout(() => sfx.playBeep(1320, 'sine', 0.12), 600);
+    setTimeout(() => {
+      onComplete();
+    }, 1250);
+  };
 
   return (
-    <div
-      className={`fixed inset-0 z-50 flex flex-col justify-between bg-[#07080b] p-6 sm:p-12 transition-opacity duration-500 select-none overflow-hidden ${
-        isFadingOut ? 'opacity-0 pointer-events-none' : 'opacity-100'
-      }`}
-    >
-      {/* Background scanlines & tactical grid */}
-      <div className="absolute inset-0 scanlines pointer-events-none opacity-40 z-10" />
-      <div className="absolute inset-0 tactical-grid opacity-30 pointer-events-none" />
+    <div className="fixed inset-0 z-50 overflow-hidden bg-bat-black flex items-center justify-center font-mono select-none">
+      <style>{`
+        @keyframes gate-slit {
+          0% { transform: scaleY(0.02) scaleX(0.6); opacity: 0; }
+          20% { transform: scaleY(0.06) scaleX(1); opacity: 1; }
+          60% { transform: scaleY(1) scaleX(1); opacity: 1; }
+          100% { transform: scaleY(1.4) scaleX(1.1); opacity: 0; }
+        }
+        @keyframes gate-flash {
+          0% { opacity: 0; }
+          25% { opacity: 0.9; }
+          100% { opacity: 0; }
+        }
+        @keyframes gate-shock {
+          0% { transform: scale(0.1); opacity: 0.9; }
+          100% { transform: scale(2.2); opacity: 0; }
+        }
+        @keyframes grid-pan {
+          0% { background-position: 0 0; }
+          100% { background-position: 0 40px; }
+        }
+        @keyframes data-flicker {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.55; }
+        }
+        @keyframes hex-spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        .animate-gate-slit { animation: gate-slit 1.15s cubic-bezier(0.16,1,0.3,1) forwards; }
+        .animate-gate-flash { animation: gate-flash 1.15s ease-out forwards; }
+        .animate-gate-shock { animation: gate-shock 1.1s cubic-bezier(0.16,1,0.3,1) forwards; }
+        .animate-grid-pan { animation: grid-pan 1.2s linear infinite; }
+      `}</style>
 
-      {/* Background subtle radar effect */}
-      <div className="absolute right-1/2 bottom-1/2 translate-x-1/2 translate-y-1/2 w-[520px] h-[520px] sm:w-[700px] sm:h-[700px] pointer-events-none opacity-20">
-        <svg viewBox="0 0 400 400" className="w-full h-full">
-          <circle cx="200" cy="200" r="190" fill="none" stroke="#dc2626" strokeWidth="1" strokeDasharray="6 4" opacity="0.4" />
-          <circle cx="200" cy="200" r="140" fill="none" stroke="#dc2626" strokeWidth="1" opacity="0.3" />
-          <circle cx="200" cy="200" r="90" fill="none" stroke="#dc2626" strokeWidth="1" opacity="0.3" />
-          <circle cx="200" cy="200" r="40" fill="none" stroke="#dc2626" strokeWidth="1" opacity="0.5" />
-          <line x1="10" y1="200" x2="390" y2="200" stroke="#dc2626" strokeWidth="0.8" opacity="0.3" />
-          <line x1="200" y1="10" x2="200" y2="390" stroke="#dc2626" strokeWidth="0.8" opacity="0.3" />
-          <g className="animate-radar-sweep">
-            <path
-              d="M 200 200 L 390 200 A 190 190 0 0 0 200 10 Z"
-              fill="url(#radarGradient)"
-              opacity="0.35"
-            />
-          </g>
-          <defs>
-            <linearGradient id="radarGradient" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stopColor="#ef4444" stopOpacity="0" />
-              <stop offset="100%" stopColor="#ef4444" stopOpacity="0.4" />
-            </linearGradient>
-          </defs>
-        </svg>
+      {/* ── TECHY AMBIENT BACKGROUND (always visible, no solid hull) ── */}
+      <div
+        className="absolute inset-0 opacity-[0.14] animate-grid-pan"
+        style={{
+          backgroundImage:
+            'linear-gradient(rgba(0,229,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,255,0.5) 1px, transparent 1px)',
+          backgroundSize: '40px 40px',
+        }}
+      />
+      {/* vignette */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_30%,rgba(0,0,0,0.85)_100%)]" />
+      {/* radar rings */}
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-20">
+        <div className="w-[70vmin] h-[70vmin] rounded-full border border-bat-cyan/40" />
+        <div className="absolute inset-8 rounded-full border border-bat-cyan/30" />
+        <div className="absolute inset-20 rounded-full border border-bat-red/40" />
+        <div
+          className="absolute inset-0 rounded-full animate-radar"
+          style={{ background: 'conic-gradient(from 0deg, rgba(0,229,255,0.35), transparent 25%)' }}
+        />
+      </div>
+      {/* scanline */}
+      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-transparent via-bat-cyan/10 to-transparent animate-scanline pointer-events-none" />
+      {/* floating data particles */}
+      <div className="absolute inset-0 pointer-events-none opacity-40">
+        {Array.from({ length: 24 }).map((_, i) => (
+          <span
+            key={i}
+            className="absolute w-1 h-1 bg-bat-cyan rounded-full"
+            style={{
+              left: `${(i * 41) % 100}%`,
+              top: `${(i * 29) % 100}%`,
+              animation: `data-flicker ${(1 + (i % 5) * 0.4).toFixed(1)}s infinite`,
+              animationDelay: `${(i * 0.17).toFixed(2)}s`,
+            }}
+          />
+        ))}
       </div>
 
-      {/* Top Bar: System Header & Skip button */}
-      <div className="relative z-20 flex items-center justify-between border-b border-slate-800/80 pb-4">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded border border-red-900/60 bg-red-950/30 flex items-center justify-center text-red-500 glow-red-sm">
-            <Terminal className="w-4 h-4" />
+      {/* corner HUD brackets */}
+      <div className="absolute top-4 left-4 w-10 h-10 border-l-2 border-t-2 border-bat-cyan/70" />
+      <div className="absolute top-4 right-4 w-10 h-10 border-r-2 border-t-2 border-bat-cyan/70" />
+      <div className="absolute bottom-4 left-4 w-10 h-10 border-l-2 border-b-2 border-bat-cyan/70" />
+      <div className="absolute bottom-4 right-4 w-10 h-10 border-r-2 border-b-2 border-bat-cyan/70" />
+
+      {/* top telemetry bar */}
+      <div className="absolute top-0 inset-x-0 z-20 flex items-center justify-between px-8 py-2 text-[10px] tracking-[0.25em] uppercase text-bat-cyan/80 border-b border-bat-cyan/20 bg-bat-black/60 backdrop-blur-sm">
+        <span className="flex items-center gap-2">
+          <Shield className="w-3.5 h-3.5" /> WAYNE TECH // SECURE UPLINK
+        </span>
+        <span className="hidden md:flex items-center gap-2">
+          <Activity className="w-3.5 h-3.5 animate-pulse" /> LAT 40.7488 :: LNG -73.9851 :: ENC AES-256
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-bat-red animate-ping" /> LIVE
+        </span>
+      </div>
+
+      {/* ── CENTER TERMINAL (never covered by solid hull) ── */}
+      <div className="relative z-20 flex flex-col items-center max-w-md w-full px-6 text-center">
+        <div className="mb-5 relative">
+          <div className="absolute -inset-4 rounded-full border border-dashed border-bat-cyan/30" style={{ animation: 'hex-spin 12s linear infinite' }} />
+          <div className="w-24 h-24 rounded-full border-2 border-bat-red flex items-center justify-center bg-bat-black shadow-[0_0_30px_rgba(255,30,39,0.5)] relative">
+            <Cpu className="w-10 h-10 text-bat-red animate-pulse" />
+            <div className="absolute inset-0 rounded-full border border-bat-cyan/40 animate-ping" />
           </div>
-          <div>
-            <div className="text-xs font-mono tracking-widest text-slate-400">WAYNE ENTERPRISES // ADVANCED RECON</div>
-            <div className="text-sm font-bold tracking-wider text-slate-200 font-heading">TACTICAL OS v4.2</div>
+          {/* orbit ticks */}
+          <div className="absolute -inset-1 flex items-center justify-between pointer-events-none">
+            <span className="w-1.5 h-1.5 bg-bat-cyan rotate-45" />
+            <span className="w-1.5 h-1.5 bg-bat-cyan rotate-45" />
           </div>
         </div>
 
-        <button
-          onClick={handleFinish}
-          className="group flex items-center gap-2 px-3 py-1.5 rounded border border-slate-800 bg-slate-900/50 hover:border-red-900 hover:bg-red-950/20 text-xs font-mono text-slate-400 hover:text-red-400 transition-colors"
-          title="Skip initialization sequence"
-        >
-          <span>SKIP SEQUENCE</span>
-          <span className="text-[10px] text-slate-400 group-hover:text-red-500">(ESC)</span>
-        </button>
-      </div>
+        <h1 className="text-2xl font-black tracking-[0.3em] text-white uppercase mb-1">THE BAT MAP</h1>
+        <p className="text-[11px] text-bat-cyan tracking-[0.25em] uppercase mb-4 font-bold flex items-center gap-2">
+          <Radio className="w-3.5 h-3.5" /> Batcomputer Tactical Dispatch
+        </p>
 
-      {/* Center: Terminal Log Container */}
-      <div className="relative z-20 my-auto max-w-2xl w-full mx-auto py-8">
-        <div className="hud-panel p-6 sm:p-8 rounded shadow-2xl border-slate-800 bg-slate-950/90">
-          {/* Panel header */}
-          <div className="flex items-center justify-between border-b border-slate-800/80 pb-3 mb-5 text-[11px] font-mono text-slate-400 tracking-wider">
+        {/* Diagnostic Logs Box */}
+        <div className="w-full bg-bat-black/80 backdrop-blur border border-bat-cyan/30 rounded p-4 text-left h-40 font-mono text-xs overflow-hidden mb-4 shadow-[0_0_25px_rgba(0,229,255,0.12)] relative">
+          <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-bat-cyan/70 to-transparent" />
+          <div className="flex items-center justify-between border-b border-bat-cyan/20 pb-2 mb-2 text-bat-cyan font-bold text-[10px] uppercase tracking-widest">
             <span className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              SECURE BOOT STREAM
+              <Terminal className="w-3.5 h-3.5" /> DIAGNOSTIC CONSOLE
             </span>
-            <span>TERMINAL ID: 0x9F4B</span>
+            <span className="text-bat-text/50">{logs.length}/5 SYNCED</span>
           </div>
-
-          {/* Lines */}
-          <div className="space-y-2.5 font-mono text-xs sm:text-sm tracking-wide">
-            {BOOT_LINES.slice(0, displayedLines).map((line, idx) => {
-              if (line.type === 'header') {
-                return (
-                  <div key={idx} className="text-red-500 font-bold pb-2 border-b border-red-950/40 glow-text-red">
-                    &gt; {line.text}
-                  </div>
-                );
-              }
-              if (line.type === 'status') {
-                return (
-                  <div key={idx} className="pt-2 text-slate-300 font-semibold flex items-center justify-between">
-                    <span>{line.text}</span>
-                    <span className="text-red-400 px-2 py-0.5 rounded bg-red-950/40 border border-red-900/40 text-xs">VERIFIED</span>
-                  </div>
-                );
-              }
-              if (line.type === 'ready') {
-                return (
-                  <div key={idx} className="pt-3 text-red-500 font-bold text-sm sm:text-base flex items-center gap-2 glow-text-red">
-                    <Shield className="w-4 h-4 text-red-500" />
-                    <span>{line.text}</span>
-                  </div>
-                );
-              }
-              return (
-                <div key={idx} className="flex justify-between items-center text-slate-400">
-                  <span>{line.text.split('...')[0]}</span>
-                  <span className="text-red-500/90 font-semibold tracking-widest text-[11px] sm:text-xs">
-                    ONLINE
-                  </span>
-                </div>
-              );
-            })}
-
-            {displayedLines < BOOT_LINES.length && (
-              <div className="flex items-center gap-1 text-red-500 pt-1">
-                <span className="text-xs">&gt;</span>
-                <span className="w-2 h-4 bg-red-500 animate-cursor inline-block" />
-              </div>
-            )}
-          </div>
-
-          {/* Progress Bar */}
-          <div className="mt-8 pt-4 border-t border-slate-800/80">
-            <div className="flex justify-between items-center text-[11px] font-mono text-slate-400 mb-2">
-              <span className="tracking-wider">CALIBRATING SYSTEM SENSORS</span>
-              <span className="text-red-400 font-bold">{progress}%</span>
+          {logs.map((log, idx) => (
+            <div key={idx} className="text-bat-text/90 tracking-tight flex items-center gap-2 text-[11px] leading-5">
+              <span className="text-bat-cyan font-bold">&gt;</span> {log}
             </div>
-            <div className="w-full h-1.5 bg-slate-900 rounded overflow-hidden border border-slate-800">
+          ))}
+          {logs.length === 0 && <div className="text-bat-text/40 text-[11px] animate-pulse">&gt; awaiting uplink…</div>}
+          {/* progress hairline */}
+          <div className="absolute bottom-0 left-0 h-0.5 bg-bat-cyan/80 transition-all duration-300" style={{ width: `${(logs.length / 5) * 100}%` }} />
+        </div>
+
+        {!opening ? (
+          <button
+            onClick={handleInitiate}
+            disabled={!canProceed && logs.length < 2}
+            className="w-full py-3 bg-bat-red text-black font-black text-xs tracking-[0.25em] hover:bg-red-500 active:scale-95 transition-all shadow-[0_0_20px_rgba(255,30,39,0.6)] flex items-center justify-center gap-2 uppercase cursor-pointer disabled:opacity-40 disabled:cursor-wait border border-bat-red"
+          >
+            <Lock className="w-4 h-4" />
+            <span>BREACH GATE / INITIALIZE</span>
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        ) : (
+          <div className="w-full border border-bat-cyan/40 bg-bat-black/80 p-3">
+            <div className="flex items-center justify-between text-[10px] tracking-[0.25em] text-bat-cyan uppercase mb-2">
+              <span className="animate-pulse">Gate disengaging…</span>
+              <span className="font-black">{progress}%</span>
+            </div>
+            <div className="h-2 bg-bat-dark overflow-hidden">
               <div
-                className="h-full bg-red-600 transition-all duration-200 shadow-[0_0_10px_#dc2626]"
+                className="h-full bg-gradient-to-r from-bat-cyan via-white to-bat-cyan transition-[width] duration-75 shadow-[0_0_12px_rgba(0,229,255,0.9)]"
                 style={{ width: `${progress}%` }}
               />
             </div>
+            <div className="mt-2 text-[9px] text-bat-text/50 tracking-[0.2em] uppercase">HULL SEAL RELEASE :: MAG-LOCK BYPASS</div>
           </div>
-        </div>
-
-        {/* Enter System Prompt */}
-        {isReady && (
-          <div className="mt-8 flex flex-col items-center text-center animate-in fade-in zoom-in duration-300">
-            <div className="text-2xl sm:text-3xl font-bold font-heading tracking-widest text-slate-100 mb-1 glow-text-red">
-              THE BAT MAP
-            </div>
-            <div className="text-xs font-mono text-red-400/90 tracking-widest mb-6">
-              TACTICAL NAVIGATION SYSTEM READY
-            </div>
-
-            <button
-              onClick={handleFinish}
-              className="group relative flex items-center gap-3 px-8 py-3.5 rounded border border-red-600 bg-red-950/40 hover:bg-red-900/50 text-slate-100 font-mono font-bold tracking-widest text-sm transition-all duration-200 glow-red hover:shadow-[0_0_25px_rgba(220,38,38,0.6)] cursor-pointer"
-            >
-              <span>[ ENTER SYSTEM ]</span>
-              <ChevronRight className="w-4 h-4 text-red-400 group-hover:translate-x-1 transition-transform" />
-            </button>
-            <div className="mt-2 text-[10px] font-mono text-slate-400">
-              PRESS ENTER OR CLICK TO ENGAGE
-            </div>
-          </div>
+        )}
+        {!opening && (
+          <button
+            type="button"
+            onClick={onComplete}
+            className="mt-3 text-[10px] tracking-[0.3em] uppercase text-bat-text/40 hover:text-bat-cyan transition-colors cursor-pointer"
+          >
+            SKIP BOOT ▸
+          </button>
         )}
       </div>
 
-      {/* Bottom Bar */}
-      <div className="relative z-20 flex flex-col sm:flex-row items-center justify-between border-t border-slate-800/80 pt-4 text-[11px] font-mono text-slate-400 gap-2">
-        <div>AUTHORIZED ACCESS ONLY // LEVEL 5 PROTOCOLS IN EFFECT</div>
-        <div>STATION: BATCAVE CENTRAL GIS CORE</div>
+      {/* ── HULL-GATE OPENING ANIMATION ONLY (no resting closed hull) ── */}
+      {opening && (
+        <div className="absolute inset-0 z-40 pointer-events-none">
+          {/* full-screen flash */}
+          <div className="absolute inset-0 bg-bat-cyan/20 animate-gate-flash" />
+          <div className="absolute inset-0 bg-white/10 animate-gate-flash" style={{ animationDelay: '0.1s' }} />
+
+          {/* central light slit that blooms open */}
+          <div className="absolute left-1/2 top-0 bottom-0 -translate-x-1/2 w-1 bg-white shadow-[0_0_40px_10px_rgba(0,229,255,0.9)] animate-gate-slit" />
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-40 h-40 rounded-full border-2 border-white/80 animate-gate-shock" />
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-40 h-40 rounded-full border border-bat-cyan animate-gate-shock" style={{ animationDelay: '0.12s' }} />
+
+          {/* LEFT energy gate — slides open */}
+          <div className="absolute top-0 left-0 w-1/2 h-full animate-hullLeft">
+            <div className="absolute inset-0 bg-gradient-to-r from-bat-charcoal/95 via-bat-dark/80 to-transparent backdrop-blur-[2px] border-r-2 border-bat-cyan shadow-[0_0_30px_rgba(0,229,255,0.5)]">
+              {/* circuit lines */}
+              <div
+                className="absolute inset-0 opacity-30"
+                style={{
+                  backgroundImage:
+                    'repeating-linear-gradient(0deg, transparent 0 22px, rgba(0,229,255,0.4) 22px 23px), repeating-linear-gradient(90deg, transparent 0 46px, rgba(0,229,255,0.25) 46px 47px)',
+                }}
+              />
+              {/* warning stripes on gate edge */}
+              <div
+                className="absolute right-0 top-0 bottom-0 w-3 opacity-80"
+                style={{ background: 'repeating-linear-gradient(180deg, #FF1E27 0 12px, #0A0A0C 12px 24px)' }}
+              />
+              <div className="absolute right-6 top-1/2 -translate-y-1/2 flex flex-col gap-3 items-end text-bat-cyan text-[10px] tracking-[0.3em] uppercase">
+                <span className="border border-bat-cyan/50 px-2 py-1 bg-bat-black/70">BAY 01</span>
+                <span className="border border-bat-cyan/50 px-2 py-1 bg-bat-black/70">MAG-LOCK ▮▮▮○○</span>
+                <span className="text-bat-red font-black">◀ RETRACT</span>
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT energy gate — slides open */}
+          <div className="absolute top-0 right-0 w-1/2 h-full animate-hullRight">
+            <div className="absolute inset-0 bg-gradient-to-l from-bat-charcoal/95 via-bat-dark/80 to-transparent backdrop-blur-[2px] border-l-2 border-bat-cyan shadow-[0_0_30px_rgba(0,229,255,0.5)]">
+              <div
+                className="absolute inset-0 opacity-30"
+                style={{
+                  backgroundImage:
+                    'repeating-linear-gradient(0deg, transparent 0 22px, rgba(0,229,255,0.4) 22px 23px), repeating-linear-gradient(90deg, transparent 0 46px, rgba(0,229,255,0.25) 46px 47px)',
+                }}
+              />
+              <div
+                className="absolute left-0 top-0 bottom-0 w-3 opacity-80"
+                style={{ background: 'repeating-linear-gradient(180deg, #FF1E27 0 12px, #0A0A0C 12px 24px)' }}
+              />
+              <div className="absolute left-6 top-1/2 -translate-y-1/2 flex flex-col gap-3 items-start text-bat-cyan text-[10px] tracking-[0.3em] uppercase">
+                <span className="border border-bat-cyan/50 px-2 py-1 bg-bat-black/70">BAY 02</span>
+                <span className="border border-bat-cyan/50 px-2 py-1 bg-bat-black/70">SEAL ▮▮▮▮○</span>
+                <span className="text-bat-red font-black">RETRACT ▶</span>
+              </div>
+            </div>
+          </div>
+
+          {/* access granted stamp */}
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 border-2 border-bat-cyan text-bat-cyan font-black tracking-[0.35em] text-sm px-6 py-3 bg-bat-black/80 animate-gate-flash">
+            ACCESS GRANTED
+          </div>
+        </div>
+      )}
+
+      {/* bottom status strip */}
+      <div className="absolute bottom-0 inset-x-0 z-20 flex items-center justify-between px-8 py-1.5 text-[9px] tracking-[0.25em] uppercase text-bat-text/50 border-t border-bat-red/20 bg-bat-black/70">
+        <span>HULL PORTAL // STANDBY — NO PHYSICAL SEAL</span>
+        <span className="text-bat-cyan/70">GATE FX: HOLOGRAPHIC BREACH v2</span>
       </div>
     </div>
   );

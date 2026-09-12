@@ -1,5 +1,11 @@
 import type { FeatureCollection, LineString } from 'geojson';
-import { type RouteData, type RouteManeuver, formatDistance, formatDuration } from './routing';
+import {
+  type RouteData,
+  type RouteManeuver,
+  formatDistance,
+  formatDuration,
+  fetchWithTimeout,
+} from './routing';
 
 interface RawOSRMRoute {
   geometry: LineString;
@@ -13,15 +19,6 @@ interface RawOSRMRoute {
       name?: string;
     }>;
   }>;
-}
-
-interface InternalRouteCandidate {
-  raw: RawOSRMRoute;
-  badnessScore: number;
-  distance: number;
-  duration: number;
-  turns: number;
-  detourRatio: number;
 }
 
 function generateStepInstruction(
@@ -74,65 +71,71 @@ function straightLineDistance(p1: [number, number], p2: [number, number]): numbe
 }
 
 /**
- * Evaluates candidates internally.
- * Internal Badness Score formula:
- * badnessScore = (distRatio * 0.40) + (durationRatio * 0.30) + (turnsRatio * 0.15) + (detourRatio * 0.15)
- * Values are strictly internal and never exposed to the UI.
+ * Picks the LONGEST candidate whose total distance fits inside the
+ * tactical radius. If nothing fits (destination itself beyond radius),
+ * falls back to the shortest candidate so navigation still works.
  */
-function evaluateCandidates(
+function pickLongestWithinRadius(
   candidates: RawOSRMRoute[],
-  start: [number, number],
-  dest: [number, number]
+  maxRadiusMeters: number
 ): RawOSRMRoute {
   if (candidates.length === 1) return candidates[0];
 
-  const straightLine = Math.max(straightLineDistance(start, dest), 500);
+  const fitting = candidates.filter((r) => r.distance <= maxRadiusMeters);
+  const pool = fitting.length > 0 ? fitting : candidates;
+  // Longest first when fitting; shortest first when nothing fits.
+  const sorted = [...pool].sort((a, b) =>
+    fitting.length > 0 ? b.distance - a.distance : a.distance - b.distance
+  );
+  return sorted[0];
+}
 
-  const parsed: InternalRouteCandidate[] = candidates.map((route) => {
-    let turns = 0;
-    route.legs?.forEach((leg) => {
-      leg.steps?.forEach((step) => {
-        if (step.maneuver?.type === 'turn' || step.maneuver?.modifier) {
-          turns++;
-        }
-      });
-    });
+/**
+ * Builds lateral detour waypoints (both sides of the direct line) sized
+ * from the spare radius budget. Waypoints are clamped so they always stay
+ * inside the radius around the origin.
+ */
+function buildDetourWaypoints(
+  start: [number, number],
+  dest: [number, number],
+  maxRadiusMeters: number
+): Array<[number, number]> {
+  const [startLng, startLat] = start;
+  const [destLng, destLat] = dest;
+  const straight = straightLineDistance(start, dest);
+  const spare = maxRadiusMeters - straight;
+  // Need meaningful spare budget for a detour to make sense.
+  if (spare < 4000) return [];
 
-    const detourRatio = route.distance / straightLine;
+  const midLng = (startLng + destLng) / 2;
+  const midLat = (startLat + destLat) / 2;
+  const dx = destLng - startLng;
+  const dy = destLat - startLat;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return [];
 
-    return {
-      raw: route,
-      badnessScore: 0,
-      distance: route.distance,
-      duration: route.duration,
-      turns: Math.max(turns, 1),
-      detourRatio,
-    };
-  });
+  // Perpendicular unit vector (degree space), both sides.
+  const px = -dy / len;
+  const py = dx / len;
 
-  // Normalize metrics
-  const maxDist = Math.max(...parsed.map((c) => c.distance), 1);
-  const maxDur = Math.max(...parsed.map((c) => c.duration), 1);
-  const maxTurns = Math.max(...parsed.map((c) => c.turns), 1);
-  const maxDetour = Math.max(...parsed.map((c) => c.detourRatio), 1);
+  // Lateral offset sized from spare budget, clamped to sane bounds.
+  // Bigger offsets → much longer road loops (still legal OSRM routes).
+  const offsetMeters = Math.min(Math.max(spare / 2.5, 3000), 30000);
+  const latRad = (midLat * Math.PI) / 180;
+  const degPerMeterLat = 1 / 111320;
+  const degPerMeterLng = 1 / (111320 * Math.max(Math.cos(latRad), 0.2));
 
-  parsed.forEach((c) => {
-    const distScore = c.distance / maxDist;
-    const durScore = c.duration / maxDur;
-    const turnScore = c.turns / maxTurns;
-    const detourScore = c.detourRatio / maxDetour;
-
-    // Internal rating formula
-    c.badnessScore =
-      distScore * 0.4 +
-      durScore * 0.3 +
-      turnScore * 0.15 +
-      detourScore * 0.15;
-  });
-
-  // Pick the candidate with the highest internal score (most scenic/complex/winding)
-  parsed.sort((a, b) => b.badnessScore - a.badnessScore);
-  return parsed[0].raw;
+  const waypoints: Array<[number, number]> = [];
+  for (const side of [1, -1]) {
+    const wLng = midLng + px * side * offsetMeters * degPerMeterLng;
+    const wLat = midLat + py * side * offsetMeters * degPerMeterLat;
+    const waypoint: [number, number] = [wLng, wLat];
+    // Hard radius gate: waypoint must stay inside the radius of origin.
+    if (straightLineDistance(start, waypoint) <= maxRadiusMeters) {
+      waypoints.push(waypoint);
+    }
+  }
+  return waypoints;
 }
 
 /**
@@ -184,67 +187,77 @@ function buildRouteData(route: RawOSRMRoute): RouteData {
 }
 
 /**
- * Hidden Route Selection Engine
- * Selects an authentic, navigable, fully legal but significantly more elaborate route.
+ * Tactical Route Selection Engine — LONGEST legal road route inside the
+ * radius (never the shortest). All requests fire IN PARALLEL so one slow
+ * OSRM query can't stall plotting, and timeouts degrade to fewer
+ * candidates instead of killing selection (only genuine caller aborts
+ * propagate).
+ *
+ * Strategy: pull OSRM alternatives for the direct corridor plus real-road
+ * detour candidates via lateral waypoints (both sides, sized from the
+ * spare radius budget). From all candidates, select the LONGEST route
+ * whose total distance stays within `maxRadiusMeters`. Every candidate is
+ * a genuine OSRM road route.
  */
 export async function selectOptimalRoute(
   start: [number, number],
   dest: [number, number],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxRadiusMeters = 100000
 ): Promise<RouteData | null> {
   const [startLng, startLat] = start;
   const [destLng, destLat] = dest;
 
   const candidateRoutes: RawOSRMRoute[] = [];
 
-  // 1. Request multiple alternative routes from OSRM
-  try {
-    const multiUrl = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${destLng},${destLat}?overview=full&geometries=geojson&steps=true&alternatives=3`;
-    const res = await fetch(multiUrl, { signal });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
-        candidateRoutes.push(...data.routes);
-      }
+  const collectRoutes = (data: unknown): void => {
+    const d = data as { code?: string; routes?: RawOSRMRoute[] };
+    if (d && d.code === 'Ok' && Array.isArray(d.routes) && d.routes.length > 0) {
+      candidateRoutes.push(...d.routes);
     }
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') throw err;
-    console.warn('Initial multi-route query failed, checking waypoint variations...', err);
-  }
+  };
 
-  // 2. If alternatives are limited, generate a tactical waypoint detour to find a more elaborate legal road route
-  if (candidateRoutes.length <= 1) {
+  const queryUrl = async (url: string, tag: string): Promise<void> => {
     try {
-      const midLng = (startLng + destLng) / 2;
-      const midLat = (startLat + destLat) / 2;
-      const dx = destLng - startLng;
-      const dy = destLat - startLat;
-
-      // Perpendicular offset (~25% lateral displacement)
-      const offsetFactor = 0.28;
-      const perpLng = midLng - dy * offsetFactor;
-      const perpLat = midLat + dx * offsetFactor;
-
-      const waypointUrl = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${perpLng.toFixed(
-        5
-      )},${perpLat.toFixed(5)};${destLng},${destLat}?overview=full&geometries=geojson&steps=true`;
-
-      const wpRes = await fetch(waypointUrl, { signal });
-      if (wpRes.ok) {
-        const wpData = await wpRes.json();
-        if (wpData.code === 'Ok' && wpData.routes && wpData.routes.length > 0) {
-          candidateRoutes.push(wpData.routes[0]);
-        }
-      }
+      const res = await fetchWithTimeout(url, 12000, signal);
+      if (res.ok) collectRoutes(await res.json());
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      console.warn('Waypoint detour query failed, proceeding with primary routes...', err);
+      // Caller abort is real cancellation — everything else (including our
+      // own fetch timeouts) just means fewer candidates, never a failure.
+      if (signal?.aborted) throw err;
+      console.warn(`${tag} query missed, continuing with remaining candidates...`);
+    }
+  };
+
+  // 1. Direct-corridor alternatives.
+  const jobs: Array<Promise<void>> = [
+    queryUrl(
+      `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${destLng},${destLat}?overview=full&geometries=geojson&steps=true&alternatives=3`,
+      'Corridor alternatives'
+    ),
+  ];
+
+  // 2. Lateral detour candidates (real-road routes via offset waypoints),
+  //    only when the straight-line distance leaves spare radius budget.
+  const straight = straightLineDistance(start, dest);
+  if (straight <= maxRadiusMeters) {
+    for (const [wLng, wLat] of buildDetourWaypoints(start, dest, maxRadiusMeters)) {
+      jobs.push(
+        queryUrl(
+          `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${wLng.toFixed(
+            5
+          )},${wLat.toFixed(5)};${destLng},${destLat}?overview=full&geometries=geojson&steps=true`,
+          'Waypoint detour'
+        )
+      );
     }
   }
 
-  // 3. Evaluate candidate routes and select the most elaborate/navigable route
+  await Promise.all(jobs);
+
+  // 3. Select the LONGEST candidate inside the radius bound.
   if (candidateRoutes.length > 0) {
-    const chosenRoute = evaluateCandidates(candidateRoutes, start, dest);
+    const chosenRoute = pickLongestWithinRadius(candidateRoutes, maxRadiusMeters);
     return buildRouteData(chosenRoute);
   }
 

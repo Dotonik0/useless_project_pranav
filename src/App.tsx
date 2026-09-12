@@ -1,390 +1,457 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { BootSequence } from './components/boot/BootSequence';
-import { BatHeader } from './components/shell/BatHeader';
-import { DestinationPanel } from './components/shell/DestinationPanel';
-import { BatMap } from './components/map/BatMap';
-import { RouteInfoPanel } from './components/shell/RouteInfoPanel';
-import { BatFooter } from './components/shell/BatFooter';
-import { SettingsModal } from './components/shell/SettingsModal';
-import { NavHUD } from './components/navigation/NavHUD';
-import { calculateRoute, formatDistance, formatDuration, type RouteData } from './services/routing';
-import { selectOptimalRoute } from './services/routeSelector';
-import { gpsManager, type GpsTelemetry } from './services/geolocation';
-import { TurnTracker, type TurnUpdate } from './services/turnTracker';
-import { audioManager } from './services/audioManager';
-import { Navigation, Compass, ChevronUp, ChevronDown } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { BootSequence } from './components/BootSequence';
+import { MapContainer } from './components/MapContainer';
+import { ManeuverCard } from './components/navigation/ManeuverCard';
+import { TelemetryDock } from './components/docks/TelemetryDock';
+import { HologramDock } from './components/docks/HologramDock';
+import { fetchBatRoute } from './services/routingEngine';
+import { batTTS } from './services/audioTTS';
+import { sfx } from './services/soundEffects';
+import { gpsManager } from './services/geolocation';
+import type { GpsTelemetry } from './services/geolocation';
+import { TurnTracker } from './services/turnTracker';
+import type { TurnUpdate } from './services/turnTracker';
+import type { RouteManeuver as EngineManeuver } from './services/routing';
+import type { LocationCoordinate, CalculatedRoute, SearchResult } from './types';
+import { Navigation, Compass, Target, MapPin, Volume2, Shield } from 'lucide-react';
 
-const BATCAVE_ORIGIN: [number, number] = [-74.0060, 40.7128];
+export function App() {
+  const [bootCompleted, setBootCompleted] = useState<boolean>(false);
+  const [userLocation, setUserLocation] = useState<LocationCoordinate | null>(null);
+  const [destination, setDestination] = useState<LocationCoordinate | null>(null);
+  const [route, setRoute] = useState<CalculatedRoute | null>(null);
 
-export const App: React.FC = () => {
-  const [bootCompleted, setBootCompleted] = useState<boolean>(() => {
-    return localStorage.getItem('batmap_boot_completed') === 'true';
-  });
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [activeTabMobile, setActiveTabMobile] = useState<'destination' | 'route'>('destination');
-  const [isMobileDrawerExpanded, setIsMobileDrawerExpanded] = useState<boolean>(false);
-  const [destinationName, setDestinationName] = useState<string | null>(null);
-  const [destinationCoords, setDestinationCoords] = useState<[number, number] | null>(null);
-  const [routeData, setRouteData] = useState<RouteData | null>(null);
-  const [, setIsRouting] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [isPlotting, setIsPlotting] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [sysMsg, setSysMsg] = useState<string | null>(null);
+  const [gps, setGps] = useState<GpsTelemetry | null>(null);
+  const [turnUpdate, setTurnUpdate] = useState<TurnUpdate | null>(null);
+  const [redrawKey, setRedrawKey] = useState(0);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guards duplicate route requests (StrictMode / re-renders / GPS updates).
+  const routeRequestRef = useRef<string | null>(null);
+  const turnTrackerRef = useRef<TurnTracker | null>(null);
 
-  // GPS & Navigation state
-  const [isNavigating, setIsNavigating] = useState<boolean>(false);
-  const [isSimulating, setIsSimulating] = useState<boolean>(false);
-  const [isCameraLocked, setIsCameraLocked] = useState<boolean>(true);
-  const [gpsTelemetry, setGpsTelemetry] = useState<GpsTelemetry>(gpsManager.getTelemetry());
-
-  // Turn-by-Turn state
-  const turnTrackerRef = useRef<TurnTracker>(new TurnTracker());
-  const [turnUpdate, setTurnUpdate] = useState<TurnUpdate>({
-    currentStep: null,
-    nextStep: null,
-    distanceToManeuver: 0,
-    formattedDistanceToManeuver: '--',
-    isArrived: false,
-  });
-
-  // Dynamic remaining metrics during navigation
-  const [remainingDistance, setRemainingDistance] = useState<string>('-- KM');
-  const [remainingDuration, setRemainingDuration] = useState<string>('-- MIN');
-
-  // HUD ticker notification
-  const [systemNotice, setSystemNotice] = useState<string>('GIS CORE // MAP ENGINE ONLINE');
-
-  const simulationTimerRef = useRef<number | null>(null);
-
-  // Prevent background scrolling
   useEffect(() => {
-    document.body.style.overflow = 'hidden';
     return () => {
-      document.body.style.overflow = 'auto';
+      if (searchTimer.current) clearTimeout(searchTimer.current);
     };
   }, []);
 
-  // Subscribe to GPS Manager updates and evaluate turn tracking
+  // Live GPS tracking (drives origin marker, telemetry docks, turn engine).
   useEffect(() => {
-    audioManager.setOnError((err) => setSystemNotice(err));
-
-    const unsubscribe = gpsManager.subscribe((telemetry) => {
-      setGpsTelemetry(telemetry);
-      if (telemetry.errorMessage) {
-        setSystemNotice(telemetry.errorMessage);
-      }
-
-      if (telemetry.coords) {
-        const update = turnTrackerRef.current.updatePosition(telemetry.coords);
-        setTurnUpdate(update);
-
-        if (update.announcementAlert && update.currentStep) {
-          const alert = update.announcementAlert;
-          const step = update.currentStep;
-
-          if (alert === '500M') {
-            setSystemNotice(`IN 500 METRES, ${step.instruction}`);
-          } else if (alert === '200M') {
-            setSystemNotice(`IN 200 METRES, ${step.instruction}`);
-          } else if (alert === '50M') {
-            setSystemNotice(`${step.instruction}`);
-          } else if (alert === 'ARRIVAL') {
-            setSystemNotice('ARRIVAL VECTOR CONFIRMED. DESTINATION REACHED.');
-          }
-
-          // Trigger audio announcement (TTS or Custom sound from IndexedDB)
-          audioManager.announceManeuver(
-            step.maneuverType,
-            step.modifier,
-            alert,
-            step.roadName
-          );
-        }
+    gpsManager.startTracking();
+    const unsub = gpsManager.subscribe((t) => {
+      setGps(t);
+      if (t.status === 'TRACKING') {
+        setUserLocation({ lat: t.coords[1], lng: t.coords[0] });
+      } else if (t.status === 'DENIED' || t.status === 'UNAVAILABLE') {
+        setUserLocation((prev) => prev ?? { lat: 40.748817, lng: -73.98513 });
       }
     });
-    return () => unsubscribe();
+    return unsub;
   }, []);
 
   const handleBootComplete = () => {
     setBootCompleted(true);
+    batTTS.speakCustom("Batcomputer online. 100 kilometer tactical pursuit matrix engaged.");
   };
 
-  const handleReplayBoot = () => {
-    localStorage.removeItem('batmap_boot_completed');
-    setBootCompleted(false);
-  };
-
-  const handleDestinationSelect = async (destination: string, coords?: [number, number]) => {
-    const targetCoords = coords || [-74.009, 40.713];
-    setDestinationName(destination);
-    setDestinationCoords(targetCoords);
-    setSystemNotice('DESTINATION LOCKED. CALCULATING PURSUIT VECTOR...');
-    setIsRouting(true);
-
-    const currentOrigin = gpsTelemetry.coords || BATCAVE_ORIGIN;
-
-    try {
-      const data =
-        (await selectOptimalRoute(currentOrigin, targetCoords)) ||
-        (await calculateRoute(currentOrigin, targetCoords));
-      if (data) {
-        setRouteData(data);
-        turnTrackerRef.current.init(data.maneuvers);
-        const initialTurn = turnTrackerRef.current.updatePosition(currentOrigin);
-        setTurnUpdate(initialTurn);
-        setRemainingDistance(data.formattedDistance);
-        setRemainingDuration(data.formattedDuration);
-        setSystemNotice('ROUTE ESTABLISHED.');
-      }
-    } catch (err) {
-      console.error('Routing error:', err);
-      setSystemNotice('ROUTE ESTABLISHED // VECTOR ESTIMATION ACTIVE');
-    } finally {
-      setIsRouting(false);
-    }
-  };
-
-  const handleLocateMe = () => {
-    gpsManager.startTracking();
-    setSystemNotice('ACQUIRING POSITION TELEMETRY SATELLITE FIX...');
-  };
-
-  const handleInitiateNavigation = () => {
-    if (!routeData) return;
-    setIsNavigating(true);
-    setIsCameraLocked(true);
-    turnTrackerRef.current.reset();
-    gpsManager.startTracking();
-    setSystemNotice('PURSUIT VECTOR ESTABLISHED. NAVIGATION ACTIVE.');
-  };
-
-  const handleDisengageNavigation = () => {
-    setIsNavigating(false);
-    setIsSimulating(false);
-    if (simulationTimerRef.current) {
-      clearInterval(simulationTimerRef.current);
-      simulationTimerRef.current = null;
-    }
-    setSystemNotice('PURSUIT VECTOR DISENGAGED. NAVIGATION STANDBY.');
-  };
-
-  // Route Simulation Engine for Testing
-  useEffect(() => {
-    if (!isNavigating || !isSimulating || !routeData) {
-      if (simulationTimerRef.current) {
-        clearInterval(simulationTimerRef.current);
-        simulationTimerRef.current = null;
-      }
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (query.length < 3) {
+      setSearchResults([]);
       return;
     }
 
-    const feature = routeData.geojson.features[0];
-    if (!feature || feature.geometry.type !== 'LineString') return;
-    const coords = feature.geometry.coordinates as [number, number][];
-    if (coords.length === 0) return;
-
-    let idx = 0;
-    const timer = setInterval(() => {
-      idx++;
-      if (idx >= coords.length) {
-        setIsSimulating(false);
-        setSystemNotice('ARRIVAL VECTOR CONFIRMED. YOU HAVE REACHED YOUR DESTINATION.');
-        return;
+    // Debounce so Nominatim doesn't rate-limit keystrokes
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        setSearchResults(Array.isArray(data) ? data : []);
+      } catch (err) {
+        console.error("Geocoding failed:", err);
       }
+    }, 400);
+  };
 
-      const curr = coords[idx];
-      const prev = coords[idx - 1];
+  // Single choke point for route computation: guarded against
+  // duplicates, reports progress + failures, always leaves UI actionable.
+  const requestRoute = useCallback(
+    async (origin: LocationCoordinate, dest: LocationCoordinate) => {
+      const key = `${origin.lat.toFixed(4)},${origin.lng.toFixed(4)}>${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}`;
+      if (routeRequestRef.current === key || isPlotting) return;
+      routeRequestRef.current = key;
+      setIsPlotting(true);
+      setRouteError(null);
+      try {
+        const calcRoute = await fetchBatRoute(origin, dest);
+        // Last-wins: a newer destination picked mid-flight supersedes this.
+        if (routeRequestRef.current !== key) return;
+        setRoute(calcRoute);
+        // Arm the live turn engine with full maneuver geometry.
+        const engineManeuvers: EngineManeuver[] = calcRoute.maneuvers.map((m) => ({
+          type: m.type,
+          modifier: m.modifier,
+          location: m.location ?? [dest.lng, dest.lat],
+          instruction: m.instruction,
+          distance: m.distance ?? 0,
+          duration: m.duration ?? 0,
+          roadName: m.roadName,
+        }));
+        turnTrackerRef.current = new TurnTracker(engineManeuvers);
+        setTurnUpdate(null);
+        setSysMsg(
+          `PATHWAY LOCKED // ${(calcRoute.distance / 1000).toFixed(1)} KM / ${calcRoute.maneuvers.length} MANEUVERS`
+        );
+        batTTS.speakCustom('Route established. Tactical pursuit trajectory locked.');
+      } catch (err) {
+        console.error('Route computation failed:', err);
+        routeRequestRef.current = null; // allow retry
+        setRouteError(err instanceof Error ? err.message : 'ROUTE UPLINK FAILED');
+      } finally {
+        setIsPlotting(false);
+      }
+    },
+    [isPlotting]
+  );
 
-      // Calculate heading degrees
-      const dLng = curr[0] - prev[0];
-      const dLat = curr[1] - prev[1];
-      const heading = (Math.atan2(dLng, dLat) * 180) / Math.PI;
+  // Auto-fetch when BOTH ends exist. Covers the race where the destination
+  // is picked before the GPS fix arrives (previously: silently no route).
+  useEffect(() => {
+    if (destination && userLocation && !route && !routeError) {
+      void requestRoute(userLocation, destination);
+    }
+  }, [destination, userLocation, route, routeError, requestRoute]);
 
-      const simulatedSpeed = 58; // km/h
-      gpsManager.updateSimulatedPosition(curr, simulatedSpeed, heading);
+  const handleSelectDestination = (result: SearchResult) => {
+    sfx.playLockSound();
+    const destLoc = { lat: parseFloat(result.lat), lng: parseFloat(result.lon) };
+    setDestination(destLoc);
+    setSearchResults([]);
+    setSearchQuery(result.display_name);
+    // New target → drop stale pathway, allow fresh request (effect fires
+    // immediately if GPS is ready, or as soon as it resolves).
+    setRoute(null);
+    setIsNavigating(false);
+    setTurnUpdate(null);
+    turnTrackerRef.current = null;
+    routeRequestRef.current = null;
 
-      // Turn tracker update
-      const update = turnTrackerRef.current.updatePosition(curr);
-      setTurnUpdate(update);
+    if (userLocation) {
+      void requestRoute(userLocation, destLoc);
+    } else {
+      setSysMsg('AWAITING GPS FIX // PATHWAY PLOTS ON LOCK');
+    }
+  };
 
-      // Remaining estimates
-      const progressFraction = idx / coords.length;
-      const remainDist = Math.max(0, routeData.distanceMeters * (1 - progressFraction));
-      const remainDur = Math.max(0, routeData.durationSeconds * (1 - progressFraction));
-      setRemainingDistance(formatDistance(remainDist));
-      setRemainingDuration(formatDuration(remainDur));
-    }, 700);
+  // Live turn engine: every GPS fix recomputes distance-to-next-maneuver,
+  // auto-advances inside 25m, and fires 500/200/50m voice alerts.
+  useEffect(() => {
+    if (!gps || gps.status !== 'TRACKING' || !isNavigating || !route) return;
+    const tracker = turnTrackerRef.current;
+    if (!tracker) return;
+    const upd = tracker.updatePosition(gps.coords);
+    setTurnUpdate(upd);
+    if (upd.announcementAlert === '500M' && upd.currentStep) {
+      batTTS.speakCustom(`In 500 metres, ${upd.currentStep.instruction}`);
+    } else if (upd.announcementAlert === '200M' && upd.currentStep) {
+      batTTS.speakCustom(`In 200 metres, ${upd.currentStep.instruction}`);
+    } else if (upd.announcementAlert === '50M' && upd.currentStep) {
+      batTTS.speakManeuver(upd.currentStep.maneuverType, upd.currentStep.modifier);
+    } else if (upd.announcementAlert === 'ARRIVAL') {
+      batTTS.speakManeuver('arrive');
+      setSysMsg('TARGET REACHED // PURSUIT COMPLETE');
+    }
+  }, [gps, isNavigating, route]);
 
-    simulationTimerRef.current = timer as unknown as number;
+  const skipStep = () => {
+    const tracker = turnTrackerRef.current;
+    if (!tracker) return;
+    tracker.advance();
+    const pos: [number, number] =
+      gps && gps.status === 'TRACKING'
+        ? gps.coords
+        : userLocation
+          ? [userLocation.lng, userLocation.lat]
+          : [0, 0];
+    const upd = tracker.updatePosition(pos);
+    setTurnUpdate(upd);
+    if (upd.currentStep) batTTS.speakManeuver(upd.currentStep.maneuverType, upd.currentStep.modifier);
+  };
 
-    return () => {
-      clearInterval(timer);
-      simulationTimerRef.current = null;
-    };
-  }, [isNavigating, isSimulating, routeData]);
+  const startNavigation = () => {
+    if (!route) return;
+    const tracker = turnTrackerRef.current;
+    if (tracker) {
+      tracker.reset();
+      const pos: [number, number] =
+        gps && gps.status === 'TRACKING'
+          ? gps.coords
+          : userLocation
+            ? [userLocation.lng, userLocation.lat]
+            : [0, 0];
+      setTurnUpdate(tracker.updatePosition(pos));
+    }
+    setIsNavigating(true);
+    batTTS.speakCustom('Pursuit vector established.');
+
+    if (route.maneuvers.length > 0) {
+      const first = route.maneuvers[0];
+      batTTS.speakManeuver(first.type, first.modifier);
+    }
+  };
+
+  const disengage = () => {
+    setIsNavigating(false);
+    setTurnUpdate(null);
+  };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#06070a] text-slate-200 flex flex-col font-mono">
-      {/* CRT Scanlines and Ambient Grid */}
-      <div className="absolute inset-0 scanlines pointer-events-none opacity-30 z-40" />
+    <div className="w-screen h-screen bg-bat-black font-mono text-bat-text flex flex-col overflow-hidden select-none">
+      {!bootCompleted && <BootSequence onComplete={handleBootComplete} />}
 
-      {/* 1. Cinematic Boot Sequence (Modal / Overlay) */}
-      {!bootCompleted && (
-        <BootSequence onComplete={handleBootComplete} />
-      )}
+      {/* Top Header HUD with Bat Logos */}
+      <header className="h-14 bg-bat-charcoal border-b border-bat-red/40 px-4 flex items-center justify-between z-30 shadow-[0_4px_20px_rgba(0,0,0,0.9)]">
+        <div className="flex items-center gap-3">
+          <div className="p-1 bg-bat-black border border-bat-red rounded-full">
+            <svg className="w-6 h-6 fill-bat-red" viewBox="0 0 24 24">
+              <path d="M12,2C10.5,3.5 8,4 6,3C4,2 3,3.5 3,5.5C3,9.5 7,12.5 12,21C17,12.5 21,9.5 21,5.5C21,3.5 20,2 18,3C16,4 13.5,3.5 12,2Z"/>
+            </svg>
+          </div>
+          <span className="font-black text-lg tracking-widest text-white uppercase">THE BAT MAP</span>
+          <span className="text-[10px] bg-bat-red/20 text-bat-red px-2 py-0.5 border border-bat-red/40 rounded uppercase font-bold">100KM MATRIX</span>
+        </div>
 
-      {/* 2. Main Application Shell */}
-      {bootCompleted && (
-        <>
-          {/* Header */}
-          <BatHeader
-            onOpenSettings={() => setIsSettingsOpen(true)}
-            onLocateMe={handleLocateMe}
-            onReplayBoot={handleReplayBoot}
-          />
+        <div className="flex items-center gap-6 text-xs text-bat-text/80">
+          <div className="hidden md:flex items-center gap-2">
+            <Compass className="w-4 h-4 text-bat-red animate-spin" /> GPS:{' '}
+            {gps?.status === 'TRACKING'
+              ? `${gps.speedKmH} KM/H`
+              : (gps?.status ?? 'ACQUIRING')}
+          </div>
+          <div className="flex items-center gap-2 text-bat-red font-bold">
+            <Target className="w-4 h-4" /> BATCOMPUTER ONLINE
+          </div>
+        </div>
+      </header>
 
-          {/* System Notification Banner (HUD ticker) */}
-          <div className="relative z-20 bg-[#0c0e14] border-b border-slate-900 px-4 py-1 text-[11px] font-mono flex items-center justify-between text-slate-400 select-none">
-            <div className="flex items-center gap-2 overflow-hidden">
-              <span className={`w-2 h-2 rounded-full ${isNavigating ? 'bg-red-500 animate-ping' : 'bg-red-600 animate-pulse'} shrink-0`} />
-              <span className="text-slate-400 font-semibold shrink-0">STATUS:</span>
-              <span className="text-red-400/90 truncate tracking-wider">{systemNotice}</span>
-            </div>
-            <div className="hidden sm:block text-[10px] text-slate-400 shrink-0">
-              BUILD: 2026.7 // TURN-BY-TURN ACTIVE
-            </div>
+      {/* Main Container: side docks flank the map so tech readouts
+          never cover the tile window (docks hidden below lg screens) */}
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        <TelemetryDock gps={gps} maneuverCount={route?.maneuvers.length ?? 0} />
+
+        <div className="flex-1 relative flex min-w-0 overflow-hidden">
+        {/* Floating Bat Panel HUD */}
+        <div className="absolute top-4 left-4 z-20 w-80 md:w-96 bg-bat-charcoal/95 backdrop-blur-md border border-bat-red/40 p-4 rounded shadow-2xl flex flex-col gap-4">
+          <div className="flex items-center justify-between border-b border-bat-red/30 pb-2">
+            <span className="text-[11px] font-bold text-bat-red tracking-widest uppercase flex items-center gap-1.5">
+              <Shield className="w-3.5 h-3.5" /> TARGET DESIGNATION
+            </span>
+            <svg className="w-4 h-4 fill-bat-red/70" viewBox="0 0 24 24">
+              <path d="M12,2C10.5,3.5 8,4 6,3C4,2 3,3.5 3,5.5C3,9.5 7,12.5 12,21C17,12.5 21,9.5 21,5.5C21,3.5 20,2 18,3C16,4 13.5,3.5 12,2Z"/>
+            </svg>
           </div>
 
-          {/* Main Viewport Content */}
-          <div className="relative flex-1 w-full overflow-hidden flex flex-col md:flex-row">
-            
-            {/* DESKTOP & LAPTOP SIDEBAR (Hidden during Navigation Mode or on Mobile) */}
-            <aside className={`hidden md:flex flex-col ${isNavigating ? 'w-72' : 'w-80 lg:w-96 xl:w-[420px]'} shrink-0 border-r border-slate-800/80 bg-[#0a0c11]/95 backdrop-blur p-4 overflow-y-auto z-20 space-y-4 transition-all duration-300`}>
-              <DestinationPanel
-                onSearchSubmit={(dest, coords) => handleDestinationSelect(dest, coords)}
-                onSelectPreset={(dest, coords) => handleDestinationSelect(dest, coords)}
-                onStatusNotice={(msg) => setSystemNotice(msg)}
+          <div>
+            <div className="relative">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder="ENTER LOCATION / COORDINATES..."
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full bg-bat-black border border-bat-red/50 px-3 py-2 text-xs text-white uppercase focus:outline-none focus:border-bat-red shadow-inner placeholder:text-bat-text/30"
               />
-              <RouteInfoPanel
-                routeStatus={isNavigating ? 'ACTIVE' : routeData ? 'ESTABLISHED' : 'STANDBY'}
-                distance={isNavigating ? remainingDistance : routeData ? routeData.formattedDistance : '-- KM'}
-                duration={isNavigating ? remainingDuration : routeData ? routeData.formattedDuration : '-- MIN'}
-                onInitiateNavigation={handleInitiateNavigation}
-              />
-            </aside>
+              <MapPin className="absolute right-2.5 top-2.5 w-4 h-4 text-bat-red" />
+            </div>
 
-            {/* REAL MAPLIBRE MAP CONTAINER (Full on Mobile, Maximized on Desktop) */}
-            <main className="relative flex-1 h-full w-full overflow-hidden">
-              {/* Active Navigation Mode HUD Overlay with Maneuver Card */}
-              {isNavigating && (
-                <NavHUD
-                  speedKmH={gpsTelemetry.speedKmH}
-                  remainingDistance={remainingDistance}
-                  remainingDuration={remainingDuration}
-                  isSimulating={isSimulating}
-                  isCameraLocked={isCameraLocked}
-                  currentStep={turnUpdate.currentStep}
-                  nextStep={turnUpdate.nextStep}
-                  distanceToManeuverFormatted={turnUpdate.formattedDistanceToManeuver}
-                  isArrived={turnUpdate.isArrived}
-                  onToggleCameraLock={() => setIsCameraLocked(!isCameraLocked)}
-                  onToggleSimulation={() => setIsSimulating(!isSimulating)}
-                  onDisengage={handleDisengageNavigation}
-                />
-              )}
+            {/* Auto-complete List */}
+            {searchResults.length > 0 && (
+              <div className="bg-bat-black border border-bat-red/40 mt-1 max-h-48 overflow-y-auto divide-y divide-bat-dark">
+                {searchResults.map((item) => (
+                  <button
+                    key={item.place_id}
+                    onClick={() => handleSelectDestination(item)}
+                    className="w-full text-left px-3 py-2 text-[11px] text-bat-text/80 hover:bg-bat-red/20 hover:text-white transition-colors"
+                  >
+                    {item.display_name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-              <BatMap
-                originCoord={BATCAVE_ORIGIN}
-                destinationCoord={destinationCoords}
-                userPosition={isNavigating ? gpsTelemetry.coords : undefined}
-                userHeading={gpsTelemetry.heading}
-                isNavigating={isNavigating}
-                isCameraLocked={isCameraLocked}
-                routeGeoJson={routeData?.geojson || null}
-                onStatusMessage={(msg) => setSystemNotice(msg)}
-              />
+          {/* Plotting / error states */}
+          {isPlotting && !route && (
+            <div className="border border-bat-red/40 bg-bat-black p-3 flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-bat-red animate-ping shrink-0" />
+              <div className="text-[11px] text-bat-red font-bold tracking-widest uppercase">
+                PLOTTING TACTICAL PATHWAY…
+                <div className="text-[9px] text-bat-text/50 font-mono tracking-normal mt-0.5">
+                  SCANNING 100KM MATRIX FOR LONGEST VECTOR
+                </div>
+              </div>
+            </div>
+          )}
+          {routeError && !route && !isPlotting && (
+            <div className="border border-amber-700/60 bg-amber-950/20 p-3 flex flex-col gap-2">
+              <div className="text-[11px] text-amber-300 font-bold tracking-widest uppercase">
+                ROUTE UPLINK FAILED
+              </div>
+              <div className="text-[10px] text-bat-text/60 font-mono break-words">{routeError}</div>
+              <button
+                onClick={() => {
+                  if (userLocation && destination) void requestRoute(userLocation, destination);
+                }}
+                className="w-full py-2 border border-bat-red text-bat-red font-black text-[11px] tracking-widest hover:bg-bat-red hover:text-black transition-all uppercase cursor-pointer"
+              >
+                RETRY PLOT
+              </button>
+            </div>
+          )}
 
-              {/* DEDICATED MOBILE OVERLAY (Visible only on < md screens) */}
-              {!isNavigating && (
-                <div className="md:hidden absolute inset-x-0 bottom-0 z-30 flex flex-col justify-end pointer-events-none">
-                  {/* Mobile Floating Drawer */}
-                  <div className="pointer-events-auto w-full bg-[#0a0c12]/95 backdrop-blur-lg border-t border-slate-800 rounded-t-xl shadow-2xl p-3 pb-4">
-                    {/* Drawer Handle & Header */}
-                    <div className="flex items-center justify-between pb-2 border-b border-slate-800/80 mb-2">
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => setActiveTabMobile('destination')}
-                          className={`px-3 py-1.5 rounded text-xs font-mono font-bold tracking-wider transition-colors min-h-[44px] flex items-center gap-1.5 ${
-                            activeTabMobile === 'destination'
-                              ? 'bg-red-950/60 border border-red-800 text-red-300'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          <Compass className="w-3.5 h-3.5" />
-                          <span>DESTINATION</span>
-                        </button>
+          {/* Tactical Route Info (Strict tactical terminology) */}
+          {route && (
+            <div className="border-t border-bat-red/20 pt-3 flex flex-col gap-2">
+              <div className="text-[11px] text-bat-red font-bold flex justify-between uppercase tracking-wider">
+                <span>ROUTE ESTABLISHED</span>
+                <span>100KM RADIUS BOUND</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs bg-bat-black p-2 border border-bat-red/30">
+                <div>
+                  <div className="text-[9px] text-bat-text/50 uppercase font-bold">DISTANCE</div>
+                  <div className="text-sm font-black text-white">{(route.distance / 1000).toFixed(2)} km</div>
+                </div>
+                <div>
+                  <div className="text-[9px] text-bat-text/50 uppercase font-bold">EST. TIME</div>
+                  <div className="text-sm font-black text-white">{Math.round(route.duration / 60)} mins</div>
+                </div>
+              </div>
 
-                        <button
-                          onClick={() => setActiveTabMobile('route')}
-                          className={`px-3 py-1.5 rounded text-xs font-mono font-bold tracking-wider transition-colors min-h-[44px] flex items-center gap-1.5 ${
-                            activeTabMobile === 'route'
-                              ? 'bg-red-950/60 border border-red-800 text-red-300'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          <Navigation className="w-3.5 h-3.5" />
-                          <span>ROUTE</span>
-                        </button>
-                      </div>
-
-                      <button
-                        onClick={() => setIsMobileDrawerExpanded(!isMobileDrawerExpanded)}
-                        className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-200 rounded"
-                        aria-label="Toggle drawer expansion"
-                      >
-                        {isMobileDrawerExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronUp className="w-5 h-5" />}
-                      </button>
-                    </div>
-
-                    {/* Drawer Body (Collapsible or Scrollable) */}
-                    <div className={`transition-all duration-300 overflow-y-auto ${isMobileDrawerExpanded ? 'max-h-[60vh]' : 'max-h-[220px]'}`}>
-                      {activeTabMobile === 'destination' ? (
-                        <DestinationPanel
-                          onSearchSubmit={(dest, coords) => handleDestinationSelect(dest, coords)}
-                          onSelectPreset={(dest, coords) => handleDestinationSelect(dest, coords)}
-                          onStatusNotice={(msg) => setSystemNotice(msg)}
-                        />
-                      ) : (
-                        <RouteInfoPanel
-                          routeStatus={routeData ? 'ESTABLISHED' : 'STANDBY'}
-                          distance={routeData ? routeData.formattedDistance : '-- KM'}
-                          duration={routeData ? routeData.formattedDuration : '-- MIN'}
-                          onInitiateNavigation={handleInitiateNavigation}
-                        />
-                      )}
-                    </div>
-                  </div>
+              {!isNavigating ? (
+                <>
+                  <button
+                    onClick={startNavigation}
+                    className="w-full py-2.5 bg-bat-red text-black font-black text-xs tracking-widest hover:bg-red-600 transition-all shadow-[0_0_15px_rgba(255,30,39,0.6)] flex items-center justify-center gap-2 uppercase cursor-pointer"
+                  >
+                    <Navigation className="w-4 h-4" /> ENGAGE NAVIGATION
+                  </button>
+                  <button
+                    onClick={() => {
+                      sfx.playLockSound();
+                      setRedrawKey((k) => k + 1);
+                      setSysMsg('MANUAL PATHWAY REDRAW // FORCING RENDER');
+                    }}
+                    className="w-full py-1.5 border border-bat-red/50 text-bat-red font-bold text-[10px] tracking-widest hover:bg-bat-red/20 transition-all uppercase cursor-pointer"
+                  >
+                    REDRAW PATH
+                  </button>
+                </>
+              ) : (
+                <div className="p-2 bg-bat-red/10 border border-bat-red flex items-center justify-between text-xs text-bat-red font-bold">
+                  <span className="flex items-center gap-1.5"><Volume2 className="w-4 h-4 animate-pulse" /> PURSUIT ACTIVE</span>
+                  <button onClick={disengage} className="underline text-[10px] text-bat-text hover:text-white">DISENGAGE</button>
                 </div>
               )}
+            </div>
+          )}
+        </div>
 
-            </main>
+        {/* Live Next-Turn Status: real-time instruction + metres-to-turn,
+            driven by GPS through the turn engine (auto-advances <25m) */}
+        {isNavigating && route && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 w-11/12 max-w-lg">
+            {turnUpdate?.currentStep ? (
+              <div className="flex flex-col gap-2">
+                <ManeuverCard
+                  currentStep={turnUpdate.currentStep}
+                  nextStep={turnUpdate.nextStep}
+                  distanceFormatted={turnUpdate.formattedDistanceToManeuver}
+                  isArrived={turnUpdate.isArrived}
+                />
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-1.5 bg-bat-black border border-bat-red/30 overflow-hidden">
+                    <div
+                      className="h-full bg-bat-red shadow-[0_0_8px_#FF1E27] transition-all duration-500"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          ((turnUpdate.currentStep.index + 1) /
+                            Math.max(route.maneuvers.length, 1)) *
+                            100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[9px] text-bat-text/60 font-mono whitespace-nowrap">
+                    STEP {turnUpdate.currentStep.index + 1}/{route.maneuvers.length}
+                  </span>
+                  <button
+                    onClick={skipStep}
+                    className="text-[10px] border border-bat-red px-3 py-1.5 text-bat-red hover:bg-bat-red hover:text-black font-bold uppercase transition-all bg-bat-charcoal/90"
+                  >
+                    SKIP STEP
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-bat-charcoal border-2 border-bat-red p-4 shadow-[0_0_35px_rgba(0,0,0,0.95)] flex items-center gap-4">
+                <div className="w-12 h-12 bg-bat-red text-black flex items-center justify-center font-black shadow-[0_0_15px_#FF1E27]">
+                  <Navigation className="w-7 h-7" />
+                </div>
+                <div className="flex-1">
+                  <div className="text-[10px] text-bat-red font-bold tracking-widest uppercase">
+                    ACQUIRING MANEUVER LOCK
+                  </div>
+                  <div className="text-xs md:text-sm font-black text-white uppercase">
+                    {route.maneuvers[0]?.instruction || 'STANDBY'}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Footer */}
-          <BatFooter
-            systemStatus="ONLINE"
-            navigationStatus={isNavigating ? 'ENGAGED' : destinationName ? 'ONLINE' : 'STANDBY'}
-            positionStatus={gpsTelemetry.status === 'TRACKING' ? 'ONLINE' : gpsTelemetry.status === 'ACQUIRING' ? 'ACQUIRING' : 'STANDBY'}
-            audioStatus="STANDBY"
-          />
+        {/* Tactical Corner Emblem Accents */}
+        <div className="absolute top-4 right-4 z-20 pointer-events-none opacity-40 hidden md:block">
+          <svg className="w-12 h-12 fill-bat-red" viewBox="0 0 24 24">
+            <path d="M12,2C10.5,3.5 8,4 6,3C4,2 3,3.5 3,5.5C3,9.5 7,12.5 12,21C17,12.5 21,9.5 21,5.5C21,3.5 20,2 18,3C16,4 13.5,3.5 12,2Z"/>
+          </svg>
+        </div>
 
-          {/* Settings Modal */}
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
-            onReplayBoot={handleReplayBoot}
-          />
-        </>
-      )}
+        {/* Map Rendering View */}
+        <MapContainer
+          userLocation={userLocation}
+          destination={destination}
+          route={route}
+          redrawSignal={redrawKey}
+          onStatusMessage={setSysMsg}
+        />
+        </div>
+
+        <HologramDock gps={gps} navigating={isNavigating} />
+      </div>
+
+      {/* Footer */}
+      <footer className="h-6 bg-bat-black border-t border-bat-red/20 px-4 flex items-center justify-between text-[10px] text-bat-text/50">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="w-2 h-2 rounded-full bg-bat-red animate-ping shrink-0"></span>
+          <span className="truncate">{sysMsg ?? 'WAYNE ENTERPRISES TACTICAL GRID v9.0.4'}</span>
+        </div>
+        <div className="flex items-center gap-4 font-mono">
+          <span>LAT: {userLocation?.lat.toFixed(4) || "0.0000"}</span>
+          <span>LNG: {userLocation?.lng.toFixed(4) || "0.0000"}</span>
+        </div>
+      </footer>
     </div>
   );
-};
+}
 
 export default App;

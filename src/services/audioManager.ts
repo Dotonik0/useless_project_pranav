@@ -1,6 +1,35 @@
 import { getCustomAudio, type CustomSoundKey } from './audioDb';
 import { settingsManager, type VoiceMode, type Personality } from './settingsManager';
 
+function pickRandomAlfred<T>(options: T[]): T {
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+function pickAlfredArrival(): string {
+  return pickRandomAlfred([
+    'Finally we here boysssss. Uh, I mean Master Wayne.',
+    'Yesss, we are here.',
+    'Destination reached, Master Wayne.',
+  ]);
+}
+
+/** Requested Alfred chaos lines for live maneuvers. Returns null when no override applies. */
+function alfredManeuverLine(maneuverType?: string, modifier?: string): string | null {
+  const t = (maneuverType || '').toLowerCase();
+  const mod = (modifier || '').toLowerCase();
+  if (t.includes('uturn') || mod.includes('uturn')) {
+    return "Sir, we're going the wrong way. Oh never mind, just take a U-turn.";
+  }
+  if (mod.includes('left')) return 'Right? No, left. Left, sir.';
+  if (mod.includes('right')) {
+    return pickRandomAlfred([
+      'Master Wayne, I think its a right.',
+      'Right, right, right.',
+    ]);
+  }
+  return null;
+}
+
 export class AudioManager {
   private currentAudioElement: HTMLAudioElement | null = null;
   private onErrorCallback?: (message: string) => void;
@@ -102,7 +131,9 @@ export class AudioManager {
     personality: Personality,
     instruction: string,
     threshold: '500M' | '300M' | '200M' | '100M' | '50M' | 'ARRIVAL',
-    roadName?: string
+    roadName?: string,
+    maneuverType?: string,
+    modifier?: string
   ): string {
     const road = roadName ? ` onto ${roadName}` : '';
 
@@ -113,10 +144,16 @@ export class AudioManager {
         case 'DARK':
           return 'We have arrived. Keep moving. Gotham never sleeps.';
         case 'ALFRED':
-          return 'Sir, you have arrived at your destination safely. I trust everything went smoothly.';
+          return pickAlfredArrival();
         default:
           return 'You have arrived at your destination.';
       }
+    }
+
+    // Alfred chaos dialogue overrides the generic distance phrasing
+    if (personality === 'ALFRED') {
+      const alfredOverride = alfredManeuverLine(maneuverType, modifier);
+      if (alfredOverride) return alfredOverride;
     }
 
     const distText = threshold === '500M' ? 'five hundred metres' : threshold === '300M' ? 'three hundred metres' : threshold === '200M' ? 'two hundred metres' : threshold === '100M' ? 'one hundred metres' : 'now';
@@ -166,7 +203,9 @@ export class AudioManager {
       settings.personality,
       instruction,
       threshold,
-      roadName
+      roadName,
+      maneuverType,
+      modifier
     );
 
     const soundKey = threshold === 'ARRIVAL' ? 'arrival' : this.mapToCustomSoundKey(maneuverType, modifier);

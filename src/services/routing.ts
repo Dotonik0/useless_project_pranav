@@ -1,5 +1,27 @@
 import type { FeatureCollection, LineString } from 'geojson';
 
+/**
+ * fetch() with a hard timeout. Routing must ALWAYS resolve — a hanging
+ * OSRM request (no error, no response) would otherwise leave the UI stuck
+ * on "PLOTTING…" forever with no pathway and no error.
+ */
+export async function fetchWithTimeout(
+  url: string,
+  timeoutMs = 15000,
+  signal?: AbortSignal
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 export interface RouteManeuver {
   type: string;
   modifier?: string;
@@ -92,7 +114,7 @@ export async function calculateRoute(
   const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${destLng},${destLat}?overview=full&geometries=geojson&steps=true`;
 
   try {
-    const res = await fetch(osrmUrl, { signal });
+    const res = await fetchWithTimeout(osrmUrl, 15000, signal);
     if (res.ok) {
       const data = await res.json();
       if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
@@ -145,9 +167,9 @@ export async function calculateRoute(
       }
     }
   } catch (err: unknown) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
-      throw err;
-    }
+    // Genuine caller cancellation propagates; our own fetch timeouts fall
+    // through to the offline vector-line fallback below.
+    if (signal?.aborted) throw err;
     console.warn('OSRM routing request failed, falling back to tactical vector line:', err);
   }
 

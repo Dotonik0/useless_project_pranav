@@ -43,24 +43,16 @@ npm run dev
 - Open http://localhost:5173, click SKIP BOOT (or sit through the dramatic Batcomputer startup like a true fan), allow location access, type a crime scene, and follow the thick crimson line of justice
 - npm run build — forge the production Batcave (dist/)
 - npm run preview — inspect the forged Batcave locally
-Project Documentation
+### Project Documentation
 For Software:
 - How it works: Pick a destination → the app queries OSRM for every legal road route plus deliberate detours, then selects the LONGEST route within a 100 km radius (shortest routes are for cowards) and draws it as a thick crimson pathway over live OpenStreetMap tiles. GPS tracking powers a real-time next-turn HUD with metres-to-turn countdown, 500m/200m/50m voice alerts, and Alfred's deeply unhelpful commentary ("Right? No, left. Left, sir.").
 - Extra unnecessary tech: live velocity/signal graphs, drifting tactical grids, system load meters, and a rotating hologram of the Batsuit MK-VII (pure SVG + CSS, zero budget spent) flanking the map in side docks.
 - Secret gimmick (do not tell Batman): the "optimal" route is optimal at being long. Arrival time is a myth. Vengeance is a detour.
 
-### Project Documentation
-For Software:
+
 
 # Screenshots (Add at least 3)
-![Screenshot1](Add screenshot 1 here with proper name)
-*Add caption explaining what this shows*
-
-![Screenshot2](Add screenshot 2 here with proper name)
-*Add caption explaining what this shows*
-
-![Screenshot3](Add screenshot 3 here with proper name)
-*Add caption explaining what this shows*
+folder ASSET1 for screenshots
 
 
 ### Project Demo
@@ -70,9 +62,7 @@ https://drive.google.com/file/d/19TouZ_tMv9ZAjY1NzgpxdPzU_jtQ56Ns/view?usp=shari
 
 
 ## Team Contributions
-- [Name 1]: [Specific contributions]
-- [Name 2]: [Specific contributions]
-- [Name 3]: [Specific contributions]
+Pranav Praveen: idea,design,developing,presentation,hosting
 
 ---
 Made with ❤️ at TinkerHub Useless Projects 

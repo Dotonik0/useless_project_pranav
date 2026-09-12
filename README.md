@@ -25,20 +25,29 @@
 ## Technical Details
 ### Technologies/Components Used
 For Software:
-- [Languages used]
-- [Frameworks used]
-- [Libraries used]
-- [Tools used]
+- **Languages used:** TypeScript, CSS, HTML
+- **Frameworks used:** React 19, Vite 8, Tailwind CSS 4
+- **Libraries used:** MapLibre GL JS 6 (map rendering), Lucide React (icons), OpenStreetMap raster tiles (map visuals), OSRM (routing engine), Nominatim + Photon (destination search), Web Speech API (Alfred's cursed voice), Web Audio API (tactical beeps and boops), Geolocation API (finding Batman)
+- **Tools used:** Node.js + npm, TypeScript compiler, oxlint, Git + GitHub, Render (hosting the Batcomputer in the cloud)
 
 
 
 ### Implementation
 For Software:
 # Installation
-[commands]
-
-# Run
-[commands]
+git clone https://github.com/Dotonik0/useless_project_pranav.git
+cd useless_project_pranav
+npm install
+Run
+npm run dev
+- Open http://localhost:5173, click SKIP BOOT (or sit through the dramatic Batcomputer startup like a true fan), allow location access, type a crime scene, and follow the thick crimson line of justice
+- npm run build — forge the production Batcave (dist/)
+- npm run preview — inspect the forged Batcave locally
+Project Documentation
+For Software:
+- How it works: Pick a destination → the app queries OSRM for every legal road route plus deliberate detours, then selects the LONGEST route within a 100 km radius (shortest routes are for cowards) and draws it as a thick crimson pathway over live OpenStreetMap tiles. GPS tracking powers a real-time next-turn HUD with metres-to-turn countdown, 500m/200m/50m voice alerts, and Alfred's deeply unhelpful commentary ("Right? No, left. Left, sir.").
+- Extra unnecessary tech: live velocity/signal graphs, drifting tactical grids, system load meters, and a rotating hologram of the Batsuit MK-VII (pure SVG + CSS, zero budget spent) flanking the map in side docks.
+- Secret gimmick (do not tell Batman): the "optimal" route is optimal at being long. Arrival time is a myth. Vengeance is a detour.
 
 ### Project Documentation
 For Software:
